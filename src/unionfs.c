@@ -44,6 +44,8 @@ static struct fuse_opt unionfs_opts[] = {
 	FUSE_OPT_KEY("statfs_omit_ro", KEY_STATFS_OMIT_RO),
 	FUSE_OPT_KEY("--version", KEY_VERSION),
 	FUSE_OPT_KEY("-V", KEY_VERSION),
+	FUSE_OPT_KEY("cowolf", KEY_COWOLF),
+	FUSE_OPT_KEY("cowolf_file_size=%s", KEY_COWOLF_THSIZE),
 	FUSE_OPT_END
 };
 

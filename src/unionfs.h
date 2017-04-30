@@ -9,6 +9,8 @@
 
 #define PATHLEN_MAX 1024
 #define HIDETAG "_HIDDEN~"
+#define COWOLF_DRMAPTAG "_DRMAP~"
+#define COWOLF_LINKTAG "_LBLINK~"
 
 #define METANAME ".unionfs"
 #define METADIR (METANAME  "/") // string concetanation!

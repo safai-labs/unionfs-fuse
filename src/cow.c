@@ -25,6 +25,7 @@
 #include "string.h"
 #include "debug.h"
 #include "usyslog.h"
+#include "cowolf.h"
 
 
 /**
@@ -177,7 +178,15 @@ int cow_cp(const char *path, int branch_ro, int branch_rw, bool copy_dir) {
 			USYSLOG(LOG_WARNING, "COW of sockets not supported: %s\n", cow.from_path);
 			RETURN(1);
 		default:
-			res = copy_file(&cow);
+			if (cowolf_create_datamap(path, branch_rw, cow.stat->st_size)
+				== 0) {
+				res = create_sparse_file(&cow);
+				if (res != 0) {
+					cowolf_destroy_datamap(path, branch_rw);
+				}
+			} else {
+				res = copy_file(&cow);
+			}
 	}
 
 	RETURN(res);

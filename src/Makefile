@@ -15,7 +15,7 @@ LIB = $(shell pkg-config --libs fuse) -lpthread
 HASHTABLE_OBJ = hashtable.o hashtable_itr.o
 LIBUNIONFS_OBJ = fuse_ops.o opts.o debug.o findbranch.o readdir.o \
 		general.o unlink.o rmdir.o cow.o cow_utils.o string.o \
-		usyslog.o
+		usyslog.o cowolf.o drm_file.o drm_mem.o
 UNIONFS_OBJ = unionfs.o
 UNIONFSCTL_OBJ = unionfsctl.o
 

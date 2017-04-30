@@ -29,6 +29,7 @@
 #include "general.h"
 #include "findbranch.h"
 #include "string.h"
+#include "cowolf.h"
 
 /**
   * If the branch that has the file to be unlinked is in read-only mode,
@@ -94,6 +95,7 @@ int unionfs_unlink(const char *path) {
 			maybe_whiteout(path, i, WHITEOUT_FILE);
 		}
 	}
+	cowolf_destroy_datamap(path, i);
 
 	RETURN(-res);
 }

@@ -57,6 +57,22 @@
 #include "usyslog.h"
 #include "conf.h"
 #include "uioctl.h"
+#include "cowolf.h"
+
+typedef struct {
+	int fd;
+	int lower_fd; // for cowolf
+	int drmap_fd; // for cowolf
+} unionfs_fhandle_t;
+
+static unionfs_fhandle_t *fhandle_create(int fd, int lower_fd, int drmap_fd) {
+	unionfs_fhandle_t *fh = malloc(sizeof(unionfs_fhandle_t));
+	if (fh == NULL) { errno = ENOMEM; return NULL; }
+	fh->fd = fd;
+	fh->lower_fd = lower_fd;
+	fh->drmap_fd = drmap_fd;
+	return fh;
+}
 
 static int unionfs_chmod(const char *path, mode_t mode) {
 	DBG("%s\n", path);
@@ -113,10 +129,16 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
 	// NOW, that the file has the proper owner we may set the requested mode
 	fchmod(res, mode);
 
-	fi->fh = res;
+	unionfs_fhandle_t *fh = fhandle_create(res, -1, -1);
+	if (fh == NULL) {
+		close(res);
+		RETURN(-errno);
+	}
+
+	fi->fh = (unsigned long)fh;
 	remove_hidden(path, i);
 
-	DBG("fd = %" PRIx64 "\n", fi->fh);
+	DBG("fd = %x\n", fh->fd);
 	RETURN(0);
 }
 
@@ -127,13 +149,14 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
  * which flush the data/metadata on close()
  */
 static int unionfs_flush(const char *path, struct fuse_file_info *fi) {
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	unionfs_fhandle_t *fh = (unionfs_fhandle_t *)fi->fh;
+	DBG("fd = %x\n", fh->fd);
 
-	int fd = dup(fi->fh);
+	int fd = dup(fh->fd);
 
 	if (fd == -1) {
 		// What to do now?
-		if (fsync(fi->fh) == -1) RETURN(-EIO);
+		if (fsync(fh->fd) == -1) RETURN(-EIO);
 
 		RETURN(-errno);
 	}
@@ -148,17 +171,18 @@ static int unionfs_flush(const char *path, struct fuse_file_info *fi) {
  * Just a stub. This method is optional and can safely be left unimplemented
  */
 static int unionfs_fsync(const char *path, int isdatasync, struct fuse_file_info *fi) {
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	unionfs_fhandle_t *fh = (unionfs_fhandle_t *)fi->fh;
+	DBG("fd = %x\n", fh->fd);
 
 	int res;
 	if (isdatasync) {
 #if _POSIX_SYNCHRONIZED_IO + 0 > 0
-		res = fdatasync(fi->fh);
+		res = fdatasync(fh->fd);
 #else
-		res = fsync(fi->fh);
+		res = fsync(fh->fd);
 #endif
 	} else {
-		res = fsync(fi->fh);
+		res = fsync(fh->fd);
 	}
 
 	if (res == -1)  RETURN(-errno);
@@ -363,24 +387,45 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 	int fd = open(p, fi->flags);
 	if (fd == -1) RETURN(-errno);
 
+	int lower_fd = -1;
+	int drmap_fd = -1;
+	if (cowolf_open(path, i, fi->flags, &lower_fd, &drmap_fd) != 0) {
+		close(fd);
+		RETURN(-errno);
+	}
+
 	if (fi->flags & (O_WRONLY | O_RDWR)) {
 		// There might have been a hide file, but since we successfully
 		// wrote to the real file, a hide file must not exist anymore
 		remove_hidden(path, i);
 	}
 
+	unionfs_fhandle_t *fh = fhandle_create(fd, lower_fd, drmap_fd);
+	if (fh == NULL) {
+		close(fd);
+		RETURN(-errno);
+	}
+
 	// This makes exec() fail
 	//fi->direct_io = 1;
-	fi->fh = (unsigned long)fd;
+	fi->fh = (unsigned long)fh;
 
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	DBG("fd = %x\n", fh->fd);
 	RETURN(0);
 }
 
 static int unionfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	unionfs_fhandle_t *fh = (unionfs_fhandle_t *)fi->fh;
+	DBG("fd = %x\n", fh->fd);
 
-	int res = pread(fi->fh, buf, size, offset);
+	int res;
+
+	if (fh->lower_fd >= 0 && fh->drmap_fd >= 0) {
+		res = cowolf_read(fh->fd, fh->lower_fd, fh->drmap_fd,
+			buf, size, offset);
+	} else {
+		res = pread(fh->fd, buf, size, offset);
+	}
 
 	if (res == -1) RETURN(-errno);
 
@@ -406,10 +451,14 @@ static int unionfs_readlink(const char *path, char *buf, size_t size) {
 }
 
 static int unionfs_release(const char *path, struct fuse_file_info *fi) {
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	unionfs_fhandle_t *fh = (unionfs_fhandle_t *)fi->fh;
+	DBG("fd = %x\n", fh->fd);
 
-	int res = close(fi->fh);
+	int res = close(fh->fd);
 	if (res == -1) RETURN(-errno);
+
+	cowolf_close(fh->lower_fd, fh->drmap_fd);
+	free(fh);
 
 	RETURN(0);
 }
@@ -490,6 +539,7 @@ static int unionfs_rename(const char *from, const char *to) {
 	}
 
 	remove_hidden(to, i); // remove hide file (if any)
+	cowolf_rename_datamap(from, to, i);
 	RETURN(0);
 }
 
@@ -646,6 +696,8 @@ static int unionfs_truncate(const char *path, off_t size) {
 
 	if (res == -1) RETURN(-errno);
 
+	cowolf_truncate_datamap(path, i, size);
+
 	RETURN(0);
 }
 
@@ -676,11 +728,18 @@ static int unionfs_utimens(const char *path, const struct timespec ts[2]) {
 
 static int unionfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
 	(void)path;
+	unionfs_fhandle_t *fh = (unionfs_fhandle_t *)fi->fh;
 
-	DBG("fd = %"PRIx64"\n", fi->fh);
+	DBG("fd = %x\n", fh->fd);
 
-	int res = pwrite(fi->fh, buf, size, offset);
+	int res = pwrite(fh->fd, buf, size, offset);
 	if (res == -1) RETURN(-errno);
+
+	if (fh->lower_fd >= 0 && fh->drmap_fd >= 0) {
+		if (cowolf_write(fh->drmap_fd, size, offset) < 0) {
+			RETURN(-errno);
+		}
+	}
 
 	RETURN(res);
 }

@@ -16,6 +16,8 @@
 
 #define ROOT_SEP ":"
 
+#define DEAFAUT_COWOLF_THSIZE  (104857600)   /* 100M */
+
 typedef struct {
 	int nbranches;
 	branch_entry_t *branches;
@@ -30,6 +32,8 @@ typedef struct {
 	pthread_rwlock_t dbgpath_lock; // locks dbgpath
 	bool hide_meta_files;
 	bool relaxed_permissions;
+	bool cowolf_enabled;
+	unsigned long cowolf_fsize_th;
 
 } uopt_t;
 
@@ -45,7 +49,9 @@ enum {
 	KEY_NOINITGROUPS,
 	KEY_RELAXED_PERMISSIONS,
 	KEY_STATFS_OMIT_RO,
-	KEY_VERSION
+	KEY_VERSION,
+	KEY_COWOLF,
+	KEY_COWOLF_THSIZE
 };
 
 
