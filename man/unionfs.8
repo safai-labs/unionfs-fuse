@@ -38,6 +38,10 @@ for an example.
 \fB\-o cow
 Enable copy\-on\-write
 .TP
+\fB\-o cowolf
+Enable copy\-on\-write optimized for large files (COW must be enabled
+to enable this feature).
+.TP
 \fB\-o hide_meta_files
 In our unionfs root path we have a .unionfs directory that includes
 metadata, such as hidden (deleted) files. This options make this
@@ -79,6 +83,11 @@ By default blocks of all branches are counted in statfs() calls
 (e.g. by 'df'). On setting this option read-only branches will be omitted
 for the summary of blocks. This may sound weird but it actually fixes
 "wrong" percentage of free space.
+.TP
+\fB\-o cowolf_file_size=size
+Minimum threshold value of cowolf file size. COWOLF gets trigerred when
+file size is equal to or larger than this size. The value can be suffixed
+by k, m, g or t. For example, 800k, 20M, 5g, 1T.
 .TP
 .SH "Options to libfuse"
 There are several further options available, which don't directly apply to
