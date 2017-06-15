@@ -87,7 +87,8 @@ int search_sml_or_eql(off_t key_off, const struct drmm_rec *recs,
 static
 bool rec_merge(struct drmm_rec *left, const struct drmm_rec *right) {
 
-	if ((left->off_end + 1) < right->off_start) {
+	if ((right->off_start > left->off_end) &&
+		((right->off_start - left->off_end) > 1)) {
 		return false;
 	}
 

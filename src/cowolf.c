@@ -103,7 +103,7 @@ int cowolf_create_datamap(const char *path, int branch, off_t file_size) {
 
 	if (!build_cowolf_paths(path, branch, mappath, linkpath)) RETURN(-1);
 
-	if (drmf_create(mappath) != 0) {
+	if (drmf_create(mappath, file_size) != 0) {
 		USYSLOG(LOG_ERR, "Creating drmap %s failed. %s\n",
 			mappath, strerror(errno));
 		RETURN(-1);
@@ -170,11 +170,19 @@ int cowolf_truncate_datamap(const char *path, int branch, off_t new_size) {
 
 	char mappath[PATHLEN_MAX];
 	if (!build_cowolf_paths(path, branch, mappath, NULL)) RETURN(-1);
-	int res = drmf_trunc(mappath, new_size);
+
+	int map_fd = -1;
+        if (drmf_open(mappath, &map_fd) != 0) {
+                RETURN(-1);
+        }
+
+	int res = drmf_trunc(map_fd, new_size);
 	if (res != 0) {
 		USYSLOG(LOG_ERR, "Truncating drmap %s failed. %s\n",
 			mappath, strerror(errno));
 	}
+
+        drmf_close(map_fd);
 
 	RETURN(res);
 }
@@ -253,16 +261,17 @@ int cowolf_rename_datamap(const char *oldpath, const char *newpath, int branch) 
  * @param path file path
  * @param branch branch number
  * @param flags flags used for opening the file
- * @param lower_fd pointer where fd for lower branch file to be returned
+ * @param cw cowolf file info
  * @param lower_fd pointer where fd for data-range map file to be returned
  * @return 0 on success, -1 on failure.
  */
-int cowolf_open(const char *path, int branch, int flags, int *lower_fd,
-	int *drmap_fd)
+int cowolf_open(const char *path, int branch, int flags, struct cwf_info *cw)
 {
         DBG("path = %s, branch = %d flags = %x\n", path, branch, flags);
-	*lower_fd = -1;
-	*drmap_fd = -1;
+
+	cw->cwf_on = 0;
+	cw->lower_fd = -1;
+	cw->drmap_fd = -1;
 
 	int map_fd = -1;
 	int lfd = -1;
@@ -334,8 +343,9 @@ int cowolf_open(const char *path, int branch, int flags, int *lower_fd,
 		goto error_out;
 	} 
 
-	*drmap_fd = map_fd;
-	*lower_fd = lfd;
+	cw->drmap_fd = map_fd;
+	cw->lower_fd = lfd;
+	cw->cwf_on = 1;
 	RETURN(0);
 error_out:
 	if (map_fd >= 0) drmf_close(map_fd);
@@ -347,18 +357,19 @@ error_out:
 /**
  * Closes the file descriptors for data-range map file and lower branch
  * file (if fds are valid).
- * @param lower_fd file descriptor for lower branch file
- * @param map_fd file descriptor for data-range map file
+ * @param cw cowolf file info
  * @return 0 on success, -1 on failure.
  */
-int cowolf_close(int lower_fd, int map_fd) {
-        DBG("lower fd = %d, map_fd = %d\n", lower_fd, map_fd);
+int cowolf_close(struct cwf_info *cw) {
+        DBG("lower fd = %d, map_fd = %d\n", cw->lower_fd, cw->drmap_fd);
 
-	if (lower_fd >= 0) {
-		close(lower_fd);
+	if (!cw->cwf_on) RETURN(0);
+
+	if (cw->lower_fd >= 0) {
+		close(cw->lower_fd);
 	}
-	if (map_fd >= 0) {
-		drmf_close(map_fd);
+	if (cw->drmap_fd >= 0) {
+		drmf_close(cw->drmap_fd);
 	}
 
 	RETURN(0);
@@ -371,23 +382,22 @@ int cowolf_close(int lower_fd, int map_fd) {
  * Essentially this is scatter-gather read from two different
  * files - one from lower branch and another from top branch.
  * @param upper_fd file descriptor for top branch file sparse file)
- * @param upper_fd file descriptor for lower branch file
- * @param map_fd file descriptor for data-range map file
+ * @param cw cowolf file info
  * @param buf buffer pointer
  * @param size bytes to read
  * @param offset offset in file
  * @return number of bytes read, or -1 on failure.
  */
-int cowolf_read(int upper_fd, int lower_fd, int map_fd,
+int cowolf_read(int upper_fd, struct cwf_info *cw,
 	char *buf, size_t size, off_t offset) {
 
 	DBG("upper = %d, lower = %d, map = %d, size = %lu, off = %lu\n",
-		upper_fd, lower_fd, map_fd, size, offset);
+		upper_fd, cw->lower_fd, cw->drmap_fd, size, offset);
 
 	struct drmf_entry *map = NULL;
 	unsigned int mcnt = 0;
-	if (drmf_get_entries(map_fd, offset, size, &map, &mcnt) != 0) {
-		USYSLOG(LOG_ERR, "Failed to obtain datamap. fd = %d\n", map_fd);
+	if (drmf_get_entries(cw->drmap_fd, offset, size, &map, &mcnt) != 0) {
+		USYSLOG(LOG_ERR, "Failed to obtain datamap. fd = %d\n", cw->drmap_fd);
 		errno = EIO;
 		RETURN(-1);
 	}
@@ -413,17 +423,19 @@ int cowolf_read(int upper_fd, int lower_fd, int map_fd,
 
 		if (lower_sz > 0) {
 			/* read the hole from lower branch */
-			rval = pread(lower_fd, buf + (size - remain),
+			rval = pread(cw->lower_fd, buf + (size - remain),
 				lower_sz, start);
 			if (rval < 0) {
 				err_saved = errno;
 				break;
-			} else if (rval < lower_sz) {
-				break;
 			}
 
-			start += lower_sz;
-			remain -= lower_sz;
+			start += rval;
+			remain -= rval;
+
+			if (rval < lower_sz) {
+				break;
+			}
 		}
 
 		if (upper_sz > 0) {
@@ -433,12 +445,14 @@ int cowolf_read(int upper_fd, int lower_fd, int map_fd,
 			if (rval < 0) {
 				err_saved = errno;
 				break;
-			} else if (rval < upper_sz) {
-				break;
 			}
 
-			start += upper_sz;
-			remain -= upper_sz;
+			start += rval;
+			remain -= rval;
+
+			if (rval < upper_sz) {
+				break;
+			}
 		}
 
 		mpe = (mpe < (map + mcnt -1)) ? mpe+1:NULL;
@@ -458,17 +472,18 @@ int cowolf_read(int upper_fd, int lower_fd, int map_fd,
  * Writes data-range maps in map file.
  * NOTE: This function does not write the data itself, but writes
  * data-range map for already-written data.
- * @param map_fd  file descriptor for data-range map file
+ * @param cw cowolf file info
  * @param size bytes written
  * @param offset file offset where data written
  * @return 0 if map is written succesfully in file, or -1 if failed.
  */
-int cowolf_write(int map_fd, size_t size, off_t offset) {
+int cowolf_write(struct cwf_info *cw, size_t size, off_t offset) {
 
-	DBG("map = %d, size = %lu, off = %lu\n", map_fd, size, offset);
+	DBG("map = %d, size = %lu, off = %lu\n", cw->drmap_fd, size, offset);
 
-	if (drmf_add_entry(map_fd, offset, size) != 0) {
-		USYSLOG(LOG_ERR, "Failed to add datamap. fd = %d\n", map_fd);
+	if (drmf_add_entry(cw->drmap_fd, offset, size) != 0) {
+		USYSLOG(LOG_ERR, "Failed to add datamap. fd = %d\n",
+			cw->drmap_fd);
 		errno = EIO;
 		RETURN(-1);
 	}

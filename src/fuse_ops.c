@@ -61,16 +61,14 @@
 
 typedef struct {
 	int fd;
-	int lower_fd; // for cowolf
-	int drmap_fd; // for cowolf
+	struct cwf_info cw;
 } unionfs_fhandle_t;
 
-static unionfs_fhandle_t *fhandle_create(int fd, int lower_fd, int drmap_fd) {
+static unionfs_fhandle_t *fhandle_create(int fd, struct cwf_info *cw) {
 	unionfs_fhandle_t *fh = malloc(sizeof(unionfs_fhandle_t));
 	if (fh == NULL) { errno = ENOMEM; return NULL; }
 	fh->fd = fd;
-	fh->lower_fd = lower_fd;
-	fh->drmap_fd = drmap_fd;
+	fh->cw = *cw;
 	return fh;
 }
 
@@ -129,7 +127,8 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
 	// NOW, that the file has the proper owner we may set the requested mode
 	fchmod(res, mode);
 
-	unionfs_fhandle_t *fh = fhandle_create(res, -1, -1);
+	struct cwf_info dummy = CWF_INFO_INITIALIZER;
+	unionfs_fhandle_t *fh = fhandle_create(res, &dummy);
 	if (fh == NULL) {
 		close(res);
 		RETURN(-errno);
@@ -387,9 +386,8 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 	int fd = open(p, fi->flags);
 	if (fd == -1) RETURN(-errno);
 
-	int lower_fd = -1;
-	int drmap_fd = -1;
-	if (cowolf_open(path, i, fi->flags, &lower_fd, &drmap_fd) != 0) {
+	struct cwf_info cw = CWF_INFO_INITIALIZER;
+	if (cowolf_open(path, i, fi->flags, &cw) != 0) {
 		close(fd);
 		RETURN(-errno);
 	}
@@ -400,7 +398,7 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 		remove_hidden(path, i);
 	}
 
-	unionfs_fhandle_t *fh = fhandle_create(fd, lower_fd, drmap_fd);
+	unionfs_fhandle_t *fh = fhandle_create(fd, &cw);
 	if (fh == NULL) {
 		close(fd);
 		RETURN(-errno);
@@ -420,9 +418,8 @@ static int unionfs_read(const char *path, char *buf, size_t size, off_t offset, 
 
 	int res;
 
-	if (fh->lower_fd >= 0 && fh->drmap_fd >= 0) {
-		res = cowolf_read(fh->fd, fh->lower_fd, fh->drmap_fd,
-			buf, size, offset);
+	if (CWF_ON(fh->cw)) {
+		res = cowolf_read(fh->fd, &fh->cw, buf, size, offset);
 	} else {
 		res = pread(fh->fd, buf, size, offset);
 	}
@@ -457,7 +454,7 @@ static int unionfs_release(const char *path, struct fuse_file_info *fi) {
 	int res = close(fh->fd);
 	if (res == -1) RETURN(-errno);
 
-	cowolf_close(fh->lower_fd, fh->drmap_fd);
+	cowolf_close(&fh->cw);
 	free(fh);
 
 	RETURN(0);
@@ -735,8 +732,8 @@ static int unionfs_write(const char *path, const char *buf, size_t size, off_t o
 	int res = pwrite(fh->fd, buf, size, offset);
 	if (res == -1) RETURN(-errno);
 
-	if (fh->lower_fd >= 0 && fh->drmap_fd >= 0) {
-		if (cowolf_write(fh->drmap_fd, size, offset) < 0) {
+	if (CWF_ON(fh->cw)) {
+		if (cowolf_write(&fh->cw, size, offset) < 0) {
 			RETURN(-errno);
 		}
 	}

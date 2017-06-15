@@ -1,5 +1,54 @@
 /**
  * @file drm_file.c: API implementation for data-range map file.
+ *
+ * Data-range map file maintains an array of mapped data zones.
+ * For example, [100, 249] indicates a mapped zone of 150 bytes
+ * (from 100th byte offset to 249th byte offset).
+ * The last record includes the region EOF to UINT64_MAX.
+ * For example, if the file size is 500 bytes and there is no
+ * mapped data zone in file (i.e. while file is sparse), map file
+ * is going to have only one entry:
+ * rec[0] = [500, UINT64_MAX]
+ *
+ * A map entry is added (50 bytes from offset 200):
+ * rec[0] = [200, 249]
+ * rec[1] = [500, UINT64_MAX]
+ *
+ * Another map entry added (50 byte from offset 450).
+ * This time map entry gets merged with the last record:
+ * rec[0] = [200, 249]
+ * rec[1] = [450, UINT64_MAX]
+ *
+ * Appending data in file: 100 byte mapped data from offset 500 is
+ * added (nothing changes in the mapped record this time):
+ * rec[0] = [200, 249]
+ * rec[1] = [450, UINT64_MAX]
+ *
+ * The rational behind having [EOF, UINT64_MAX] as the last entry
+ * is to read data from this area from upper branch, instead of
+ * trying to read from lower branch (because lower branch is not
+ * going to data for this area). For example, when a file grows
+ * in upper branch, we must read data from growth area from upper
+ * branch. For example, let's assume initial size of a file is 1000
+ * bytes, then following operations are done:
+ *
+ * lseek(fd, 2000, SEEK_SET);
+ * write(fd, data, 500);
+ * lseek(fd, 1500, SEEK_SET);
+ * read(fd, buf, 100);
+ *
+ * Given this file has the last map record [1000, UINT64_MAX],
+ * read() is going to read from upper branch.
+ *
+ * The last record [EOF, UINT64_MAX] covers truncate related
+ * usecases as well. In following example with file initial size
+ * 1000 bytes, read() is going to read from upper branch
+ * (instead of erroneously reading from lower branch):
+ *
+ * ftruncate(fd, 400);
+ * ftruncate(fd, 3000);
+ * lseek(fd, 600, SEEK_SET);
+ * read(fd, buf, 100);
  */
 
 #include <stdio.h>
@@ -20,9 +69,6 @@
 #define RECSZ sizeof(struct drmm_rec)
 #define  MAX(x, y)  (((x) > (y))?(x):(y))
 #define  MIN(x, y)  (((x) < (y))?(x):(y))
-
-/* this sentinel is always added at the end of the file */
-static const struct drmm_rec rec_sentinel = { UINT64_MAX, UINT64_MAX };
 
 /**
  * lock file
@@ -100,12 +146,11 @@ static int file_load(int fd, bool extra_rec_space, struct drmm_rec **recs,
 		goto error_out;
 	}
 
-	/* last record is sentinel record */
-	if ((buf[num_rec -1].off_start != rec_sentinel.off_start)
-		|| (buf[num_rec -1].off_end != rec_sentinel.off_end)) {
+	/* last record off_end is always UINT64_MAX */
+	if (buf[num_rec -1].off_end != UINT64_MAX) {
 
-		USYSLOG(LOG_ERR, "fd %d is missing end sentinel.\n"
-			" got %lu %lu instead.",
+		USYSLOG(LOG_ERR, "fd %d is missing end sentinel rec.\n"
+			" got %lu %lu instead.\n",
 			fd, buf[num_rec -1].off_start,
 			buf[num_rec -1].off_end);
 		goto error_out;
@@ -127,6 +172,15 @@ static int file_save(int fd, const struct drmm_rec *recs,
 	unsigned int cnt) {
 	size_t sz = cnt*RECSZ;
 
+	/* last record off_end is always UINT64_MAX */
+	if (recs[cnt -1].off_end != UINT64_MAX) {
+
+		USYSLOG(LOG_ERR, "missing end sentinel rec whle writing.\n"
+			" got %lu %lu instead.\n",
+			recs[cnt -1].off_start,
+			recs[cnt -1].off_end);
+	}
+
 	if (pwrite(fd, recs, sz, 0) != sz) {
 		USYSLOG(LOG_ERR, "write(%d) failed. %s\n", fd, strerror(errno));
 		RETURN(-1);
@@ -145,7 +199,7 @@ static int file_save(int fd, const struct drmm_rec *recs,
  * @param path data-range map file to be created
  * @return 0 if created successfully. -1 on failure.
  */
-int drmf_create(const char *path) {
+int drmf_create(const char *path, off_t size_initial) {
 	DBG("%s\n", path);
 	int ret = 0;
 
@@ -168,7 +222,8 @@ int drmf_create(const char *path) {
 	}
 
 	if (file_lock(fd) == 0) {
-		int sz = pwrite(fd, &rec_sentinel, RECSZ, 0);
+		struct drmm_rec last_rec = { size_initial, UINT64_MAX };
+		int sz = pwrite(fd, &last_rec, RECSZ, 0);
 		if (sz != RECSZ) {
 			USYSLOG(LOG_ERR, "pwrite(%s, %d) failed. ret = %d. %s\n",
 				path, (int)RECSZ, sz, strerror(errno));
@@ -276,12 +331,7 @@ int drmf_add_entry(int map_fd, off_t offset, size_t len) {
 		goto error_out;
 	}
 
-	num_rec = drmm_rec_insert(&new_rec, recs, num_rec -1);
-
-	/* add sentinel */
-	recs[num_rec].off_start = rec_sentinel.off_start;
-	recs[num_rec].off_end = rec_sentinel.off_end;
-	num_rec++;
+	num_rec = drmm_rec_insert(&new_rec, recs, num_rec);
 
 	if (file_save(map_fd, recs, num_rec) != 0) {
 		goto error_out;
@@ -336,10 +386,10 @@ int drmf_get_entries(int map_fd, off_t offset, size_t len,
 
 	file_unlock(map_fd);
 
-	olap_cnt = drmm_rec_find_overlaps(offset, len, recs, num_rec -1,
+	olap_cnt = drmm_rec_find_overlaps(offset, len, recs, num_rec,
 			&olap_indx_first);
 	if (olap_cnt == 0) {
-		RETURN(0); // not an error
+		RETURN(0); /* not an error */
 	}
 
 	dm_tmp = (struct drmf_entry *)malloc(
@@ -370,50 +420,88 @@ int drmf_get_entries(int map_fd, off_t offset, size_t len,
 /**
  * Truncates the the data-range map to new size of of a file.
  * All the map records beyond the new_size are removed from the map file.
- * @param path path for data-range map file
+ * Given the last record also include the region EOF to UINT64_MAX,
+ * the last record is adjusted accordingly.
+ * @param map_fd file desc of map file
  * @param new_size new size of file
  * @return 0 is truncated successfully (including no record removed).
  *         - on failure.
  */
-int drmf_trunc(const char *path, off_t new_size) {
-	DBG("path = %s, size = %lu\n", path, new_size);
+int drmf_trunc(int map_fd, off_t new_size) {
+	DBG("map_fd = %d, size = %lu\n", map_fd, new_size);
 
 	struct drmm_rec *recs = NULL;
-	int fd = -1;
 	unsigned int num_rec = 0;
 	int rval = -1;
 	int lck_ret = -1;
+	off_t saved_last_start;
 
-	if (drmf_open(path, &fd) != 0) {
-		RETURN(-1);
-	}
-
-	if ((lck_ret = file_lock(fd)) != 0) {
+	if ((lck_ret = file_lock(map_fd)) != 0) {
 		goto err_out;
 	}
 
-	if (file_load(fd, false, &recs, &num_rec) != 0) {
+	if (file_load(map_fd, true, &recs, &num_rec) != 0) {
 		goto err_out;
 	}
 
+	/* last record is for the region beyond EOF, truncate
+	 * without it.
+	 */
+	saved_last_start = recs[num_rec -1].off_start;
 	num_rec = drmm_rec_truncate(new_size, recs, num_rec -1);
 
-	/* add sentinel */
-	recs[num_rec].off_start = rec_sentinel.off_start;
-	recs[num_rec].off_end = rec_sentinel.off_end;
-	num_rec++;
+	/* add last record:
+	 * CASE 1:
+	 * If truncation position is in unmapped area, truncated
+	 * part simply gets added to the last record.
+	 *   rec[0] = [100, 199]
+	 *   rec[1] = [500, UINT64_MAX]
+	 *    --------------------------------
+	 *   |          |MMMMMMMM|            |
+	 *   |          |100     |199         |499 (EOF)
+	 *    --------------------------------
+	 *        truncate here -------->|399
+	 *
+	 * after truncation:
+	 *   rec[0] = [100, 199]
+	 *   rec[1] = [400, UINT64_MAX]
+	 *    ---------------------------
+	 *   |          |MMMMMMMM|       |
+	 *   |          |100     |199    |399 (EOF)
+	 *    ---------------------------
+	 *
+	 * CASE 2:
+	 * If truncation position is in mapped area, mapped area
+	 * gets merged into the last record (which is EOF to UINT64_MAX).
+	 *   rec[0] = [100, 299]
+	 *   rec[1] = [500, UINT64_MAX]
+	 *    ---------------------------------
+	 *   |          |MMMMMMMMMMMM|         |
+	 *   |          |100         |299      |499 (EOF)
+	 *    ---------------------------------
+	 *    truncate here -->|199
+	 *
+	 * after truncation:
+	 *   rec[0] = [100, UINT64_MAX]
+	 *    -----------------
+	 *   |          |MMMMMM|
+	 *   |          |100   |199 (EOF)
+	 *    -----------------
+	 */
+	if (saved_last_start < new_size) {
+		new_size = saved_last_start;
+	}
+	struct drmm_rec last_rec = { new_size, UINT64_MAX };
+	num_rec = drmm_rec_insert(&last_rec, recs, num_rec);
 
-	if (file_save(fd, recs, num_rec) != 0) {
+	if (file_save(map_fd, recs, num_rec) != 0) {
 		goto err_out;
 	}
 
 	rval = 0;
 err_out:
 	if (recs != NULL) free(recs);
-	if (fd >= 0) {
-		if (lck_ret == 0) file_unlock(fd);
-		drmf_close(fd);
-	}
+	if (lck_ret == 0) file_unlock(map_fd);
 
 	RETURN(rval);
 }

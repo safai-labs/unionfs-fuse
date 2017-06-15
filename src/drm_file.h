@@ -11,7 +11,7 @@ struct drmf_entry {
 	size_t len;
 };
 
-int drmf_create(const char *mpath);
+int drmf_create(const char *mpath, off_t size_initial);
 int drmf_destroy(const char *mpath);
 int drmf_rename(const char *oldpath, const char *newpath);
 
@@ -22,6 +22,6 @@ int drmf_add_entry(int map_fd, off_t offset, size_t len);
 int drmf_get_entries(int map_fd, off_t offset, size_t len,
 	struct drmf_entry **entries, unsigned int *count);
 
-int drmf_trunc(const char *mpath, off_t new_size);
+int drmf_trunc(int map_fd, off_t new_size);
 
 #endif
