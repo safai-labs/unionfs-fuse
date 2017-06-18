@@ -60,6 +60,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/file.h>
 
 #include "usyslog.h"
 #include "debug.h"
@@ -73,36 +74,23 @@
 /**
  * lock file
  */
-static int file_lock(int fd) {
-	struct flock lock;
+static inline int file_lock(int fd) {
+	if (flock(fd, LOCK_EX) == 0) RETURN(0);
 
-	memset(&lock, 0, sizeof(lock));
-	lock.l_type = F_WRLCK;
-	if (fcntl(fd, F_SETLKW, &lock) != 0) {
-		USYSLOG(LOG_ERR, "fcntl(%d) failed to lock %s\n",
-			fd, strerror(errno));
-		RETURN(-1);
-	}
-
-	RETURN(0);
+	USYSLOG(LOG_ERR, "flock(%d) failed to lock %s\n",
+		fd, strerror(errno));
+	RETURN(-1);
 }
 
 /**
  * unlock file
  */
-static int file_unlock(int fd) {
+static inline int file_unlock(int fd) {
+	if (flock(fd, LOCK_UN) == 0) RETURN(0);
 
-	struct flock lock;
-
-	memset (&lock, 0, sizeof(lock));
-	lock.l_type = F_UNLCK;
-	if (fcntl(fd, F_SETLKW, &lock) != 0) {
-		USYSLOG(LOG_ERR, "fcntl(%d) failed to unlock %s\n",
-			fd, strerror(errno));
-		RETURN(-1);
-	}
-
-	RETURN(0);
+	USYSLOG(LOG_ERR, "flock(%d) failed to unlock %s\n",
+		fd, strerror(errno));
+	RETURN(-1);
 }
 
 /**
