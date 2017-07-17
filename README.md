@@ -31,6 +31,7 @@ This is a fork from original repository: https://github.com/rpodgorny/unionfs-fu
 
 When new data is written in an existing file located in lower read-only branch, the whole file is copied from lower branch to upper read-write branch. This is known as COPY-UP operation in unionfs-fuse. For example, if there is a file 'foo' with size 1MB in lower read-only branch, this is how it would look like BEFORE and AFTER write operation on this file.
 
+'''
 BEEFORE any write() on foo:
 
 upper_branch (read-write):        no foo file here
@@ -38,8 +39,7 @@ upper_branch (read-write):        no foo file here
 lower_branch (read-only):         -----------------------------------------------------------
                                   |DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
                                   -----------------------------------------------------------
-                                  
-                                  
+                                                                    
 AFTER write(size=1K, offset=2K) on foo:
 
                                    ---2K----->|<--1K-->|
@@ -50,6 +50,7 @@ lower_branch (read-write):        ----------------------------------------------
 lower_branch (read-only):         -----------------------------------------------------------
                                   |DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
                                   -----------------------------------------------------------
+'''
 
 Here, existing data is marked with "D" and modified data (due to write) is marked with "N"
 
@@ -58,7 +59,7 @@ This works perfectly as long a the files are small and COPY-UP is quick. But COP
 COWOLF feature solves this problem by NOT copying the whole file. Instead doing COPY-UP the whole file, it creates a sparse file on upper branch. It also creates a map-table in metadata directory to keep track of modified data (due to write operations) on upper branch. New data is written into sparse file and corresponding <offset, length> entry is added in map table. If a read request falls within a <offset, length> range of a map entry, data is served from the upper branch. Otherwise, data is read from lower branch.
 
 With this feature, the above diagram would look like this:
-
+'''
 BEEFORE any write() on foo:
 
 upper_branch (read-write):        no foo file here
@@ -66,8 +67,7 @@ upper_branch (read-write):        no foo file here
 lower_branch (read-only):         -----------------------------------------------------------
                                   |DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
                                   -----------------------------------------------------------
-                                  
-                                  
+                                         
 AFTER write(size=1K, offset=2K) on foo:
 
                                    ---2K----->|<--1K-->|
@@ -78,6 +78,7 @@ lower_branch (read-write):        ----------------------------------------------
 lower_branch (read-only):         -----------------------------------------------------------
                                   |DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD|
                                   -----------------------------------------------------------
+'''
 
 For newly written data marked with "N", an entry is added in map table.
 For a read(size=4K, offset=2K) on this file, first 1K is served from upper branch and next 3K is served from lower branch.
