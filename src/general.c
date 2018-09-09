@@ -213,3 +213,18 @@ int set_owner(const char *path) {
 	}
 	RETURN(0);
 }
+
+int create_metapath(const char *path, int branch_rw) {
+
+	char metapath[PATHLEN_MAX];
+
+	if (BUILD_PATH(metapath, METADIR, path))  RETURN(-1);
+
+	// p MUST be without path to branch prefix here! 2 x branch_rw is
+	// correct here!
+	// this creates e.g. branch/.unionfs/some_directory
+	path_create_cutlast(metapath, branch_rw, branch_rw);
+
+	RETURN(0);
+}
+

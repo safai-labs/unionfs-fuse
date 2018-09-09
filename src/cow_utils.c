@@ -285,3 +285,56 @@ int copy_special(struct cow *cow)
 	}
 	RETURN(setfile(cow->to_path, cow->stat));
 }
+
+/**
+ *
+ * TODO: this function could be merged with copy_file with a flag to
+ * copy (or not to copy) real data from source file.
+ **/
+int create_sparse_file(struct cow *cow)
+{
+#define	RETAINBITS (S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
+
+	DBG("from %s to %s\n", cow->from_path, cow->to_path);
+
+	struct stat to_stat, *fs;
+	int to_fd;
+	int rval = 0;
+
+	fs = cow->stat;
+
+	to_fd = open(cow->to_path, O_WRONLY | O_TRUNC | O_CREAT,
+	             fs->st_mode & ~(S_ISTXT | S_ISUID | S_ISGID));
+
+	if (to_fd == -1) {
+		USYSLOG(LOG_WARNING, "%s", cow->to_path);
+		RETURN(1);
+	}
+
+	ftruncate(to_fd, fs->st_size);
+
+	if (setfile(cow->to_path, cow->stat)) {
+		rval = 1;
+	/*
+	 * If the source was setuid or setgid, lose the bits unless the
+	 * copy is owned by the same user and group.
+	 */
+	} else if (fs->st_mode & (S_ISUID | S_ISGID) && fs->st_uid == cow->uid) {
+		if (fstat(to_fd, &to_stat)) {
+			USYSLOG(LOG_WARNING, "%s", cow->to_path);
+			rval = 1;
+		} else if (fs->st_gid == to_stat.st_gid &&
+		    fchmod(to_fd, fs->st_mode & RETAINBITS & ~cow->umask)) {
+			USYSLOG(LOG_WARNING, "%s", cow->to_path);
+			rval = 1;
+		}
+	}
+	if (close(to_fd)) {
+		USYSLOG(LOG_WARNING, "%s", cow->to_path);
+		rval = 1;
+	}
+
+	RETURN(rval);
+
+#undef RETAINBITS
+}

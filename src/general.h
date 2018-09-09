@@ -27,6 +27,6 @@ int hide_dir(const char *path, int branch_rw);
 filetype_t path_is_dir (const char *path);
 int maybe_whiteout(const char *path, int branch_rw, enum whiteout mode);
 int set_owner(const char *path);
-
+int create_metapath(const char *path, int branch_rw);
 
 #endif

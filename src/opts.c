@@ -73,7 +73,6 @@ bool set_debug_onoff(int value)
 	return res;
 }
 
-
 /**
  * Set the maximum number of open files
  */
@@ -97,11 +96,60 @@ int set_max_open_files(const char *arg)
 	return 0;
 }
 
+/**
+ * Set minimum file size for COWOLF
+ */
+int set_cowolf_file_size(const char *arg)
+{
+	unsigned long sz;
+	char suf;
+
+	int cnt = sscanf(arg, "cowolf_file_size=%ld%c\n", &sz, &suf);
+	if ((cnt < 1) || (sz < 0)) {
+		goto error_out;
+	}
+
+	if (cnt == 2) {
+		switch(suf) {
+		case 't':
+		case 'T':
+			sz *= 1024;
+			/* fall through */
+		case 'g':
+		case 'G':
+			sz *= 1024;
+			/* fall through */
+		case 'm':
+		case 'M':
+			sz *= 1024;
+			/* fall through */
+		case 'k':
+		case 'K':
+			sz *= 1024;
+			/* fall through */
+			break;
+
+		default:
+			goto error_out;
+		}
+	}
+
+	uopt.cowolf_fsize_th = sz;
+	return 0;
+
+error_out:
+	fprintf(stderr, "%s Converting %s to number failed, aborting!\n",
+		__func__, arg);
+	exit(1);
+
+	return 0;
+}
 
 uopt_t uopt;
 
 void uopt_init() {
 	memset(&uopt, 0, sizeof(uopt_t)); // initialize options with zeros first
+	uopt.cowolf_fsize_th = DEAFAUT_COWOLF_THSIZE;
 
 	pthread_rwlock_init(&uopt.dbgpath_lock, NULL);
 }
@@ -296,6 +344,8 @@ static void print_help(const char *progname) {
 	"    -o relaxed_permissions Disable permissions checks, but only if\n"
 	"                           running neither as UID=0 or GID=0\n"
 	"    -o statfs_omit_ro      do not count blocks of ro-branches\n"
+	"    -o cowolf              enable COW-optimization for large files\n"
+	"    -o cowolf_file_size=size Minimum file size for COW-optimization\n"
 	"\n",
 	progname);
 }
@@ -402,6 +452,12 @@ int unionfs_opt_proc(void *data, const char *arg, int key, struct fuse_args *out
 #endif
 			uopt.doexit = 1;
 			return 1;
+		case KEY_COWOLF:
+			uopt.cowolf_enabled = true;
+			return 0;
+		case KEY_COWOLF_THSIZE:
+			set_cowolf_file_size(arg);
+			return 0;
 		default:
  			uopt.retval = 1;
 			return 1;
